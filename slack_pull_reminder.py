@@ -60,8 +60,7 @@ def count_pull_request_reviews(pull_request):
     reviews = {}
 
     for r in pull_request.reviews():
-        if r.state != 'COMMENTED':
-            reviews[r.user.login] = r.state
+        reviews[r.user.login] = r.state
 
     for r_user in reviews:
         if reviews[r_user] == 'APPROVED':
@@ -70,11 +69,12 @@ def count_pull_request_reviews(pull_request):
     result = {
         'APPROVED': 0,
         'CHANGES_REQUESTED': 0,
-        'PENDING': 0
+        'PENDING': 0,
+        'COMMENTED': 0
     }
 
     for _, value in reviews.items():
-        if value in ['APPROVED', 'CHANGES_REQUESTED', 'PENDING']:
+        if value in ['APPROVED', 'CHANGES_REQUESTED', 'PENDING', 'COMMENTED']:
             result[value] = result[value] + 1
 
     return result
@@ -219,11 +219,12 @@ def send_to_slack(ready_to_merge=[], waiting_for_aprobals=[], changes_needed=[],
         'blocks': json.dumps(blocks)
     }
 
-    response = requests.post(POST_URL, data=payload)
-    answer = response.json()
-    if not answer['ok']:
-        print(answer)
-        raise Exception(answer['error'])
+    if len(blockeds) > 0 or len(ready_to_merge) > 0 or len(waiting_for_aprobals) > 0 or len(changes_needed) > 0:
+        response = requests.post(POST_URL, data=payload)
+        answer = response.json()
+        if not answer['ok']:
+            print(answer)
+            raise Exception(answer['error'])
 
 
 def cli():
@@ -238,7 +239,7 @@ def cli():
         if pr['is_blocked']:
             blockeds.append(pr)
         else:
-            if pr['reviews']['CHANGES_REQUESTED'] > 0:
+            if pr['reviews']['CHANGES_REQUESTED'] > 0 or pr['reviews']['COMMENTED'] > 0:
                 changes_needed.append(pr)
             elif pr['reviews']['APPROVED'] >= MIN_OF_REVIEW:
                 ready_to_merge.append(pr)
