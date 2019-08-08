@@ -1,10 +1,12 @@
 import os
 import sys
-
+import json
 import requests
 from github3 import login
 
 POST_URL = 'https://slack.com/api/chat.postMessage'
+
+BLOCKED_LABEL = 'BLOCKED'
 
 ignore = os.environ.get('IGNORE_WORDS')
 IGNORE_WORDS = [i.lower().strip() for i in ignore.split(',')] if ignore else []
@@ -17,6 +19,8 @@ USERNAMES = [u.lower().strip() for u in usernames.split(',')] if usernames else 
 
 SLACK_CHANNEL = os.environ.get('SLACK_CHANNEL', 'peya_automation')
 
+MIN_OF_REVIEW = os.environ.get('MIN_OF_REVIEW', 0)
+
 try:
     SLACK_API_TOKEN = os.environ['SLACK_API_TOKEN']
     GITHUB_API_TOKEN = os.environ['GITHUB_API_TOKEN']
@@ -24,12 +28,6 @@ try:
 except KeyError as error:
     sys.stderr.write('Please set the environment variable {0}'.format(error))
     sys.exit(1)
-
-INITIAL_MESSAGE = """\
-Hi! There's a few open pull requests you should take a \
-look at:
-
-"""
 
 
 def fetch_repository_pulls(repository):
@@ -49,15 +47,52 @@ def is_valid_title(title):
     return True
 
 
+def as_label(pull, text):
+    for label in pull.labels:
+        if str(label['name']).upper() == text:
+            return True
+    return False
+
+
+def count_pull_request_reviews(pull_request):
+    count = 0
+
+    reviews = {}
+
+    for r in pull_request.reviews():
+        if r.state != 'COMMENTED':
+            reviews[r.user.login] = r.state
+
+    for r_user in reviews:
+        if reviews[r_user] == 'APPROVED':
+            count += 1
+
+    result = {
+        'APPROVED': 0,
+        'CHANGES_REQUESTED': 0,
+        'PENDING': 0
+    }
+
+    for _, value in reviews.items():
+        if value in ['APPROVED', 'CHANGES_REQUESTED', 'PENDING']:
+            result[value] = result[value] + 1
+
+    return result
+
+
 def format_pull_requests(pull_requests, owner, repository):
     lines = []
 
     for pull in pull_requests:
         if is_valid_title(pull.title):
             creator = pull.user.login
-            line = '*[{0}/{1}]* <{2}|{3} - by {4}>'.format(
+            text = ' » *[{0}/{1}]* <{2}|{3} - by {4}>'.format(
                 owner, repository, pull.html_url, pull.title, creator)
-            lines.append(line)
+            lines.append({
+                "text": text,
+                "is_blocked": as_label(pull, BLOCKED_LABEL),
+                "reviews": count_pull_request_reviews(pull)
+            })
 
     return lines
 
@@ -80,12 +115,108 @@ def fetch_organization_pulls(organization_name):
     return lines
 
 
-def send_to_slack(text):
+def send_to_slack(ready_to_merge=[], waiting_for_aprobals=[], changes_needed=[], blockeds=[]):
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "\n"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "\n"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🚧 *Open Pull Requests Waiting for Merge* 🚧"
+            }
+        }
+    ]
+
+    if len(ready_to_merge) > 0:
+        blocks.append({
+            "type": "divider"
+        })
+
+        lines = ''
+
+        for pr in ready_to_merge:
+            lines += '\n' + pr['text']
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Ready to Merge:*" + lines
+            }
+        })
+
+    if len(waiting_for_aprobals) > 0:
+        blocks.append({
+            "type": "divider"
+        })
+
+        lines = ''
+
+        for pr in waiting_for_aprobals:
+            lines += '\n' + pr['text']
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Waiting for aprobals:*" + lines
+            }
+        })
+
+    if len(changes_needed) > 0:
+        blocks.append({
+            "type": "divider"
+        })
+
+        lines = ''
+
+        for pr in changes_needed:
+            lines += '\n' + pr['text']
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Changes Needed:*" + lines
+            }
+        })
+
+    if len(blockeds) > 0:
+        blocks.append({
+            "type": "divider"
+        })
+
+        lines = ''
+
+        for pr in blockeds:
+            lines += '\n' + pr['text']
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Blockeds:*" + lines
+            }
+        })
+
     payload = {
         'token': SLACK_API_TOKEN,
         'channel': SLACK_CHANNEL,
         'as_user': False,
-        'text': text
+        'blocks': json.dumps(blocks)
     }
 
     response = requests.post(POST_URL, data=payload)
@@ -96,11 +227,25 @@ def send_to_slack(text):
 
 
 def cli():
-    lines = fetch_organization_pulls(ORGANIZATION)
-    if lines:
-        text = INITIAL_MESSAGE + '\n'.join(lines)
-        print(text)
-        send_to_slack(text)
+    pull_requests = fetch_organization_pulls(ORGANIZATION)
+
+    blockeds = []
+    ready_to_merge = []
+    waiting_for_aprobals = []
+    changes_needed = []
+
+    for pr in pull_requests:
+        if pr['is_blocked']:
+            blockeds.append(pr)
+        else:
+            if pr['reviews']['CHANGES_REQUESTED'] > 0:
+                changes_needed.append(pr)
+            elif pr['reviews']['APPROVED'] >= MIN_OF_REVIEW:
+                ready_to_merge.append(pr)
+            else:
+                waiting_for_aprobals.append(pr)
+
+    send_to_slack(ready_to_merge, waiting_for_aprobals, changes_needed, blockeds)
 
 
 if __name__ == '__main__':
