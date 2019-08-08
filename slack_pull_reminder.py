@@ -19,7 +19,7 @@ USERNAMES = [u.lower().strip() for u in usernames.split(',')] if usernames else 
 
 SLACK_CHANNEL = os.environ.get('SLACK_CHANNEL', 'peya_automation')
 
-MIN_OF_REVIEW = os.environ.get('MIN_OF_REVIEW', 0)
+MIN_OF_REVIEW = int(os.environ.get('MIN_OF_REVIEW', 0))
 
 try:
     SLACK_API_TOKEN = os.environ['SLACK_API_TOKEN']
